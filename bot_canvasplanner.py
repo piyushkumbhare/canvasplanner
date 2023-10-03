@@ -39,7 +39,7 @@ CANVAS_TOKEN = os.getenv('CANVAS_TOKEN')
 
 #Daily task run time
 # PST = UTC - 8
-run_time = datetime.time(hour=4, minute=57)
+run_time = datetime.time(hour=16, minute=00)
 
 
 def on_command(interaction):
@@ -375,7 +375,7 @@ Call with one or both of the following:
         base_url = userInfo[user_id]['canvas-instance']
     else:
         print(f"\tUser inputted: {base_url}")
-        result = re.search(r"^.*(canvas\.[^\/]+\.[^\/]+).*$", base_url)
+        result = re.search(r"(\w+\.\w+\.\w+).*$", base_url)
         if result is None:
             print(f"\tError: Invalid URL")
             await interaction.channel.send(f"`{base_url}` is not a valid URL! It should include `canvas.xxxxx.xxx`")
@@ -390,11 +390,16 @@ Call with one or both of the following:
     if(token is None):
         token = userInfo[user_id]['canvas-token']
 
+    failure = False
     # Make a GET request to Canvas to retrieve user's Name and ID.
-    canvas_request = requests.get(f"https://{base_url}/api/v1/users/self?access_token={token}")
+    try:
+        canvas_request = requests.get(f"https://{base_url}/api/v1/users/self?access_token={token}")
+    except Exception as e:
+        print(f"\tRan into Exception: [{e}] when performing GET request")
+        failure = True
 
     # If failure, end and delete interaction
-    if(not validCode(canvas_request.status_code)):            
+    if(not validCode(canvas_request.status_code) or failure == True):            
         print(f"\tError with Canvas GET request: Status Code {canvas_request.status_code} for:\n{canvas_request.url}")
 
         await interaction.response.send_message(f"There was a problem with the outgoing request to Canvas. Make sure your API Access Token is up to date and your URL Instance is correct.")
