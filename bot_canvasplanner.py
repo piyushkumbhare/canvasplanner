@@ -80,7 +80,7 @@ async def on_ready():
         print(f"\tLoaded info for {len(userInfo)} users.")
     print(f"\tTime right now: {datetime.datetime.utcnow()}")
     print(f"\tDaily task will run once per day at {run_time} UTC")
-    daily.start()
+    daily_task.start()
     activity = discord.Activity(type=discord.ActivityType.listening, name="/help ✅")
     await bot.change_presence(activity=activity)
 
@@ -88,8 +88,8 @@ async def on_ready():
 
         
 @tasks.loop(time=run_time)
-async def daily():
-    await simulate_daily()
+async def daily_task():
+    await daily(ids=[])
         
 
 
@@ -185,13 +185,12 @@ async def simdaily(ctx: commands.context.Context):
         for userid, userdata in userInfo.items():
             if(arg == userdata['name']):
                 ids.append(userid)
-
-    await simulate_daily(ids=ids)
+    await daily(ids=ids)
     return
 
 
 
-async def simulate_daily(ids=None):
+async def daily(ids=None):
     print("-- Starting Daily Task")
 
     me = bot.get_user(MY_ID)
@@ -203,6 +202,7 @@ async def simulate_daily(ids=None):
     global userInfo
     users_to_iterate = ids if (len(ids) > 0) else list(userInfo.keys())
 
+    await me.send([bot.get_user(int(i)).name for i in users_to_iterate])   
     print(f"\t{users_to_iterate}")
 
     for user_id in users_to_iterate:
@@ -240,10 +240,11 @@ async def simulate_daily(ids=None):
         
         userInfo[user_id]['pending-assignments'] = {}
         
-        assignments = []
+        assignments = {}
         for course in courses_json:
             id = course['id']
-            course_assignments = requests.get(f"https://{canvas_instance}/api/v1/users/{canvas_id}/courses/{id}/assignments?access_token={canvas_token}")
+            params = {'include': ['submission']}
+            course_assignments = requests.get(f"https://{canvas_instance}/api/v1/users/{canvas_id}/courses/{id}/assignments?access_token={canvas_token}", params=params)
             
             if(not validCode(course_assignments.status_code)):            
                 print(f"\tError with Canvas GET request: Status Code {courses_request.status_code} for:\n{courses_request.url}\nSkipping assignment {id}")
@@ -251,39 +252,58 @@ async def simulate_daily(ids=None):
 
 
             course_assignments_json = course_assignments.json()
+            assignments[course['name']] = []
+            has_incomplete_assignments = False
             for asgn in course_assignments_json:
 
+            
                 if(asgn['due_at'] is None):
                     continue
 
+            
                 time_until_due = datetime.datetime.strptime(asgn['due_at'], '%Y-%m-%dT%H:%M:%SZ') - datetime.datetime.utcnow()
                 one_day = datetime.timedelta(days=userInfo[user_id]['days-warning'])
-                if time_until_due <= one_day and time_until_due > datetime.timedelta(days=0) and asgn['id'] not in userInfo[user_id]['completed-assignments']:
-                    assignments.append((asgn, time_until_due, course['name']))
+                # if time_until_due <= one_day and time_until_due > datetime.timedelta(days=0) and asgn['id'] not in userInfo[user_id]['completed-assignments']:
+                if time_until_due <= one_day and time_until_due > datetime.timedelta(days=0):
+                    assignments[course['name']].append((asgn['name'], time_until_due, asgn['submission']['submitted_at'] != None, asgn['html_url']))
+                    has_incomplete_assignments = True
 
+        if(not has_incomplete_assignments):
+            print(f"\t{bot.get_user(int(user_id)).name} has no pending assignments!")
+            continue
+
+        # print(assignments)
         if(len(assignments) > 0):    
-            line = "----------------------------------------------------------------------\n"
             user = bot.get_user(int(user_id))
+            user = bot.get_user(MY_ID)
 
-
-            await user.send(f"**REMINDER!**\nHey {userInfo[user_id]['canvas-name']}, here is a list of assignments that are due in the next {userInfo[user_id]['days-warning']} days!\nTo mark an assignment as complete, react to it with a :white_check_mark: \n*(To toggle notifications off, type `/toggle-notifications False`)*")
+            embed = discord.Embed(title="Assignment Reminder", description=f"Hey {userInfo[user_id]['canvas-name']}, here is a list of assignments that are due in the next {userInfo[user_id]['days-warning']} days!", color=discord.Color.green())
             
-            for asgn, due_in, course_name in assignments:
-                msg = f"{line}*{asgn['name']}* (Course: *{course_name}*)\nDue in: **{due_in.days} days, {math.floor(due_in.seconds/3600)} hours, and {math.ceil(due_in.seconds%3600 / 60)} minutes**\nHere is the link to the assignment: {asgn['html_url']}\n{line}"
-                print(msg)
+            for course_name, asgns in assignments.items():
+                if(len(asgns) > 0):
+                    full = False
+                    msg = ""
+                    for (name, due_in, submitted, link) in asgns:
+                        emoji = "✅" if submitted else "⛔"
+                        line = f"- {emoji} *{name}* \n    - Due in {due_in.days} days, {math.floor(due_in.seconds/3600)} hours, and {math.ceil(due_in.seconds%3600 / 60)} minutes\n  - Link: {link}\n"
+                        if(len(msg) + len(line) > 1024):
+                            full = True
+                            embed.add_field(name=course_name, value=msg)
+                            msg = ""
+                        msg += line
+                    embed.add_field(name="\u200b" if full else course_name, value=msg, inline=False)
                 
-                message = await user.send(msg)
 
-                await message.add_reaction("✅")
 
-                userInfo[user_id]['pending-assignments'][message.id] = asgn['id']
-                
+            embed.set_footer(text="(To toggle notifications off, type `/toggle-notifications False`)")
+            
+            await user.send(embed=embed)
 
             print(f"\tSuccessfully sent reminders for {userInfo[user_id]['name']}")
         else:
             print(f"\tUser {userInfo[user_id]['name']} has no assignments due. Woohoo!")
 
-        return
+    return
 
 
 
@@ -467,15 +487,15 @@ async def toggle_notifications(interaction: discord.Interaction, toggle: bool=Tr
 
 
 @bot.tree.command(name="get-assignments", description="Returns a list of your upcoming assignments.")
-async def get_assignments(interaction: discord.Interaction):
+@app_commands.describe(days="Show assignments due within this many days (Default 7)")
+async def get_assignments(interaction: discord.Interaction, days: int=7):
     on_command(interaction)
-
+    
     user_id = str(interaction.user.id)
-
-    if(user_id not in userInfo.keys()):
-        print(f"\tUser {interaction.user.name} not found in database. Aborting.")
-        await interaction.response.send_message("It looks like you have not been added to my database yet. Please do so by calling /setup-user.")
-        return
+    # If user has notifications toggled off, skip
+    global userInfo    
+    print(f"\tSending reminders for {userInfo[user_id]['name']}")
+    
 
     canvas_instance = userInfo[user_id]['canvas-instance']
     canvas_token = userInfo[user_id]['canvas-token']
@@ -484,54 +504,93 @@ async def get_assignments(interaction: discord.Interaction):
     courses_request = requests.get(f"https://{canvas_instance}/api/v1/users/self/favorites/courses?access_token={canvas_token}")
 
     if(not validCode(courses_request.status_code)):            
-        print(f"\tError with Canvas GET request: Status Code {courses_request.status_code} for:\n{courses_request.url}")
-
-        await interaction.response.send_message(f"There was a problem with the outgoing request to Canvas. Make sure your API Access Token is up to date and your URL Instance is correct.")
+        print(f"\tError with Canvas GET request: Status Code {courses_request.status_code} for:\n{courses_request.url}\nSkipping user {userInfo[user_id]['name']}({user_id})")
+        interaction.response.send_message(f"Looks like there was a problem with the request")
         return
     
-    else:
-        print(f"\tSuccessful Canvas GET request: Status Code {courses_request.status_code}")
-
-    await interaction.response.defer()
     courses_json = courses_request.json()
 
-    assignments = []
-    for i in courses_json:
-        id = i['id']
-        course_assignments = requests.get(f"https://{canvas_instance}/api/v1/users/{canvas_id}/courses/{id}/assignments?access_token={canvas_token}")
-        
-        course_assignments_json = course_assignments.json()
-        assignments.extend(course_assignments_json)
+    # 'pending-assignments' is a dictionary mapping message ID -> assignment ID. For each message, check if it has a checkmark reaction.
+    # If it does, then add it to the list of assignments to ignore.
 
 
-    dateless_assignments = []
-
-    to_remove = []
-
-    for i in assignments:
-        if(str(i['due_at']) == "None"):
-            dateless_assignments.append(i)
-            to_remove.append(i)
-            # print(f"Assignment: {i['name']}, Due at: {i['due_at']}")
-
-    for i in to_remove:
-        assignments.remove(i)
-
-    assignments = sorted(assignments, key=(lambda asgn : asgn['due_at']))    
-    to_print = list(f"{i['name']:<60} Due in: {datetime.datetime.strptime(i['due_at'], '%Y-%m-%dT%H:%M:%SZ') - datetime.datetime.utcnow()}" for i in assignments if (datetime.datetime.strptime(i['due_at'], '%Y-%m-%dT%H:%M:%SZ') - datetime.datetime.today()) > datetime.timedelta(days=0))
-    message = f"```{'Assignment Name': <60} Time until due\n"
-    for i in to_print:
-        message += i + '\n'
-
-    message += '\nThe following assignments have no due date:\n'
-
-    for i in dateless_assignments:
-        message += f"{i['name']:<60}\n"
-
-
-    message += '```'
+    for message_id in userInfo[user_id]['pending-assignments'].keys():
+        message = await bot.get_user(int(user_id)).fetch_message(int(message_id))
+        for reaction in message.reactions:
+            if reaction.count == 2:
+                print(f"\tReaction found on message {message_id}.")
+                completed = userInfo[user_id]['pending-assignments'][message_id]
+                userInfo[user_id]['completed-assignments'].append(completed)
     
-    await interaction.followup.send(content=message)
+    await interaction.response.defer()    
+    assignments = {}
+    for course in courses_json:
+        id = course['id']
+        params = {'include': ['submission']}
+        course_assignments = requests.get(f"https://{canvas_instance}/api/v1/users/{canvas_id}/courses/{id}/assignments?access_token={canvas_token}", params=params)
+        
+        if(not validCode(course_assignments.status_code)):            
+            print(f"\tError with Canvas GET request: Status Code {courses_request.status_code} for:\n{courses_request.url}\nSkipping assignment {id}")
+            continue
+
+
+        course_assignments_json = course_assignments.json()
+        assignments[course['name']] = []
+        has_incomplete_assignments = False
+        for asgn in course_assignments_json:
+
+        
+            if(asgn['due_at'] is None):
+                continue
+
+        
+            time_until_due = datetime.datetime.strptime(asgn['due_at'], '%Y-%m-%dT%H:%M:%SZ') - datetime.datetime.utcnow()
+            if time_until_due > datetime.timedelta(days=0) and time_until_due <= datetime.timedelta(days=days):
+                assignments[course['name']].append((asgn['name'], time_until_due, asgn['submission']['submitted_at'] != None, asgn['html_url']))
+                has_incomplete_assignments = True
+
+    if(not has_incomplete_assignments):
+        print(f"\t{bot.get_user(int(user_id)).name} has no pending assignments!")
+        no_asgn = discord.Embed(title="Assignments", description=f"Congratulations @{interaction.user.name}, you have no upcoming assignments!", color= discord.Color.green())
+        await interaction.response.send_message(embed=no_asgn)
+        return
+    
+    print(assignments)
+    if(len(assignments) > 0):    
+
+        embed = discord.Embed(title="Assignment Reminder", description=f"Hey @{interaction.user.name}, here is a list of assignments that are due in the next {userInfo[user_id]['days-warning']} days!", color=discord.Color.green())
+        
+        for course_name, asgns in assignments.items():
+            if(len(asgns) > 0):
+                full = False
+                msg = ""
+                for (name, due_in, submitted, link) in asgns:
+                    # submitted = True
+                    # print(name, due_in, submitted)
+                    emoji = "✅" if submitted else "⛔"
+                    if(not submitted):
+                        embed.color = discord.Color.red()
+                    line = f"- {emoji} *{name}* \n    - Due in {'**' * (due_in < datetime.timedelta(days=3))}{due_in.days} days, {math.floor(due_in.seconds/3600)} hours, and {math.ceil(due_in.seconds%3600 / 60)} minutes{'**' * (due_in < datetime.timedelta(days=3))}\n  - Link: {link}\n"
+                    if(len(msg) + len(line) > 1024):
+                        full = True
+                        embed.add_field(name=course_name, value=msg)
+                        msg = ""
+                    msg += line
+                # print(msg)
+                # print(len(msg))
+                embed.add_field(name="\u200b" if full else course_name, value=msg, inline=False)
+            
+
+        
+        await interaction.followup.send(embed=embed)
+
+        print(f"\tSuccessfully sent reminders for {userInfo[user_id]['name']}")
+    else:
+        print(f"\tUser {userInfo[user_id]['name']} has no assignments due. Woohoo!")
+
+    return
+
+
     return
 
 
@@ -565,29 +624,16 @@ async def get_courses(interaction: discord.Interaction):
 
     message = "Here is a list of your active courses.\n```\n"
     count = 1
+    embed = discord.Embed(title="Courses", description="Here is a list of your active courses", color=discord.Color.green())
     for i in courses_json:
+        value = f"https://{canvas_instance}/courses/{i['id']}"
+        embed.add_field(name=f"{count}. {i['name']}", value=value, inline=False)
         message += f"{count}. {i['name']}\n"
         count += 1
     message += "```"
-    await interaction.response.send_message(message)
+    await interaction.response.send_message(embed=embed)
     return
 
-
-@bot.tree.command(name="reset-completed-assignments", description="Resets completed assignments. Only call this if you accidentally marked an assignment as complete.")
-async def reset_completed_assignments(interaction: discord.Interaction):
-    on_command(interaction)
-
-    user_id = str(interaction.user.id)
-
-    if(user_id not in userInfo.keys()):
-        await interaction.response.send_message("It looks like you have not been added to my database yet. Please do so by calling /setup-user.")
-        return   
-
-    print(f"\tResetting [{userInfo[user_id]['completed-assignments']}] to [] (Empty List)")
-
-    userInfo[user_id]['completed-assignments'] = [] 
-
-    await interaction.response.send_message(f"Your completed assignments list has been reset.")
 
 """####################################################################
 DRIVER CODE
