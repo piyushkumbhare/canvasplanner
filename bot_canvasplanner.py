@@ -80,7 +80,9 @@ async def on_ready():
         print(f"\tLoaded info for {len(userInfo)} users.")
     print(f"\tTime right now: {datetime.datetime.utcnow()}")
     print(f"\tDaily task will run once per day at {run_time} UTC")
-    daily_task.start()
+    
+    # daily_task.start()
+    
     activity = discord.Activity(type=discord.ActivityType.listening, name="/help ✅")
     await bot.change_presence(activity=activity)
 
@@ -112,6 +114,8 @@ async def printjson(ctx):
 
     await ctx.send(f"```{jsondict}```")
     return
+
+
 
 @bot.command()
 @commands.dm_only()
@@ -229,16 +233,18 @@ async def daily(ids=None):
         # 'pending-assignments' is a dictionary mapping message ID -> assignment ID. For each message, check if it has a checkmark reaction.
         # If it does, then add it to the list of assignments to ignore.
 
+        # Commenting out this functionality as this is replaced with Canvas' API 'includes: submission' parameter. This now allows
+        # you to see if the assignment has been turned in.
 
-        for message_id in userInfo[user_id]['pending-assignments'].keys():
-            message = await bot.get_user(int(user_id)).fetch_message(int(message_id))
-            for reaction in message.reactions:
-                if reaction.count == 2:
-                    print(f"\tReaction found on message {message_id}.")
-                    completed = userInfo[user_id]['pending-assignments'][message_id]
-                    userInfo[user_id]['completed-assignments'].append(completed)
+        # for message_id in userInfo[user_id]['pending-assignments'].keys():
+        #     message = await bot.get_user(int(user_id)).fetch_message(int(message_id))
+        #     for reaction in message.reactions:
+        #         if reaction.count == 2:
+        #             print(f"\tReaction found on message {message_id}.")
+        #             completed = userInfo[user_id]['pending-assignments'][message_id]
+        #             userInfo[user_id]['completed-assignments'].append(completed)
         
-        userInfo[user_id]['pending-assignments'] = {}
+        # userInfo[user_id]['pending-assignments'] = {}
         
         assignments = {}
         for course in courses_json:
@@ -492,10 +498,9 @@ async def get_assignments(interaction: discord.Interaction, days: int=7):
     on_command(interaction)
     
     user_id = str(interaction.user.id)
-    # If user has notifications toggled off, skip
     global userInfo    
-    print(f"\tSending reminders for {userInfo[user_id]['name']}")
     
+    await interaction.response.defer()
 
     canvas_instance = userInfo[user_id]['canvas-instance']
     canvas_token = userInfo[user_id]['canvas-token']
@@ -505,28 +510,20 @@ async def get_assignments(interaction: discord.Interaction, days: int=7):
 
     if(not validCode(courses_request.status_code)):            
         print(f"\tError with Canvas GET request: Status Code {courses_request.status_code} for:\n{courses_request.url}\nSkipping user {userInfo[user_id]['name']}({user_id})")
-        interaction.response.send_message(f"Looks like there was a problem with the request")
+        interaction.response.send_message(f"Looks like there was a problem with the request. Please make sure your APIs have been set up correctly.\n(run `/help` for more info)")
         return
     
     courses_json = courses_request.json()
 
-    # 'pending-assignments' is a dictionary mapping message ID -> assignment ID. For each message, check if it has a checkmark reaction.
-    # If it does, then add it to the list of assignments to ignore.
-
-
-    for message_id in userInfo[user_id]['pending-assignments'].keys():
-        message = await bot.get_user(int(user_id)).fetch_message(int(message_id))
-        for reaction in message.reactions:
-            if reaction.count == 2:
-                print(f"\tReaction found on message {message_id}.")
-                completed = userInfo[user_id]['pending-assignments'][message_id]
-                userInfo[user_id]['completed-assignments'].append(completed)
-    
-    await interaction.response.defer()    
     assignments = {}
+    has_incomplete_assignments = False
+
     for course in courses_json:
         id = course['id']
-        params = {'include': ['submission']}
+        params = {
+            'include': ['submission'],
+            'per_page': 500
+            }
         course_assignments = requests.get(f"https://{canvas_instance}/api/v1/users/{canvas_id}/courses/{id}/assignments?access_token={canvas_token}", params=params)
         
         if(not validCode(course_assignments.status_code)):            
@@ -536,15 +533,15 @@ async def get_assignments(interaction: discord.Interaction, days: int=7):
 
         course_assignments_json = course_assignments.json()
         assignments[course['name']] = []
-        has_incomplete_assignments = False
         for asgn in course_assignments_json:
 
-        
             if(asgn['due_at'] is None):
                 continue
 
         
             time_until_due = datetime.datetime.strptime(asgn['due_at'], '%Y-%m-%dT%H:%M:%SZ') - datetime.datetime.utcnow()
+            # print(f"\t{asgn['name']}\t\t\t{time_until_due}")
+
             if time_until_due > datetime.timedelta(days=0) and time_until_due <= datetime.timedelta(days=days):
                 assignments[course['name']].append((asgn['name'], time_until_due, asgn['submission']['submitted_at'] != None, asgn['html_url']))
                 has_incomplete_assignments = True
@@ -552,7 +549,7 @@ async def get_assignments(interaction: discord.Interaction, days: int=7):
     if(not has_incomplete_assignments):
         print(f"\t{bot.get_user(int(user_id)).name} has no pending assignments!")
         no_asgn = discord.Embed(title="Assignments", description=f"Congratulations @{interaction.user.name}, you have no upcoming assignments!", color= discord.Color.green())
-        await interaction.response.send_message(embed=no_asgn)
+        await interaction.followup.send(embed=no_asgn)
         return
     
     print(assignments)
@@ -591,7 +588,6 @@ async def get_assignments(interaction: discord.Interaction, days: int=7):
     return
 
 
-    return
 
 
 
