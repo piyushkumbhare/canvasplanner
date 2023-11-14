@@ -80,7 +80,9 @@ async def on_ready():
         print(f"\tLoaded info for {len(userInfo)} users.")
     print(f"\tTime right now: {datetime.datetime.utcnow()}")
     print(f"\tDaily task will run once per day at {run_time} UTC")
-    daily_task.start()
+    
+    # daily_task.start()
+    
     activity = discord.Activity(type=discord.ActivityType.listening, name="/help ✅")
     await bot.change_presence(activity=activity)
 
@@ -112,6 +114,8 @@ async def printjson(ctx):
 
     await ctx.send(f"```{jsondict}```")
     return
+
+
 
 @bot.command()
 @commands.dm_only()
@@ -211,97 +215,23 @@ async def daily(ids=None):
             print(f"\tSkipping reminders for {userInfo[user_id]['name']}")
             continue
         print(f"\tSending reminders for {userInfo[user_id]['name']}")
-        
 
-        canvas_instance = userInfo[user_id]['canvas-instance']
-        canvas_token = userInfo[user_id]['canvas-token']
-        canvas_id = userInfo[user_id]['canvas-id']
+        assignments = fetch_assignments(user_id=user_id)    
+        incomplete_assignments = sum(len(l) for l in assignments.values())
 
-        courses_request = requests.get(f"https://{canvas_instance}/api/v1/users/self/favorites/courses?access_token={canvas_token}")
-
-        if(not validCode(courses_request.status_code)):            
-            print(f"\tError with Canvas GET request: Status Code {courses_request.status_code} for:\n{courses_request.url}\nSkipping user {userInfo[user_id]['name']}({user_id})")
-
-            continue
-        
-        courses_json = courses_request.json()
-
-        # 'pending-assignments' is a dictionary mapping message ID -> assignment ID. For each message, check if it has a checkmark reaction.
-        # If it does, then add it to the list of assignments to ignore.
-
-
-        for message_id in userInfo[user_id]['pending-assignments'].keys():
-            message = await bot.get_user(int(user_id)).fetch_message(int(message_id))
-            for reaction in message.reactions:
-                if reaction.count == 2:
-                    print(f"\tReaction found on message {message_id}.")
-                    completed = userInfo[user_id]['pending-assignments'][message_id]
-                    userInfo[user_id]['completed-assignments'].append(completed)
-        
-        userInfo[user_id]['pending-assignments'] = {}
-        
-        assignments = {}
-        for course in courses_json:
-            id = course['id']
-            params = {'include': ['submission']}
-            course_assignments = requests.get(f"https://{canvas_instance}/api/v1/users/{canvas_id}/courses/{id}/assignments?access_token={canvas_token}", params=params)
-            
-            if(not validCode(course_assignments.status_code)):            
-                print(f"\tError with Canvas GET request: Status Code {courses_request.status_code} for:\n{courses_request.url}\nSkipping assignment {id}")
-                continue
-
-
-            course_assignments_json = course_assignments.json()
-            assignments[course['name']] = []
-            has_incomplete_assignments = False
-            for asgn in course_assignments_json:
-
-            
-                if(asgn['due_at'] is None):
-                    continue
-
-            
-                time_until_due = datetime.datetime.strptime(asgn['due_at'], '%Y-%m-%dT%H:%M:%SZ') - datetime.datetime.utcnow()
-                one_day = datetime.timedelta(days=userInfo[user_id]['days-warning'])
-                # if time_until_due <= one_day and time_until_due > datetime.timedelta(days=0) and asgn['id'] not in userInfo[user_id]['completed-assignments']:
-                if time_until_due <= one_day and time_until_due > datetime.timedelta(days=0):
-                    assignments[course['name']].append((asgn['name'], time_until_due, asgn['submission']['submitted_at'] != None, asgn['html_url']))
-                    has_incomplete_assignments = True
-
-        if(not has_incomplete_assignments):
+        if(incomplete_assignments == 0):
             print(f"\t{bot.get_user(int(user_id)).name} has no pending assignments!")
             continue
 
-        # print(assignments)
-        if(len(assignments) > 0):    
-            user = bot.get_user(int(user_id))
-            user = bot.get_user(MY_ID)
+        user = bot.get_user(int(user_id))
+        user = bot.get_user(MY_ID)
 
-            embed = discord.Embed(title="Assignment Reminder", description=f"Hey {userInfo[user_id]['canvas-name']}, here is a list of assignments that are due in the next {userInfo[user_id]['days-warning']} days!", color=discord.Color.green())
-            
-            for course_name, asgns in assignments.items():
-                if(len(asgns) > 0):
-                    full = False
-                    msg = ""
-                    for (name, due_in, submitted, link) in asgns:
-                        emoji = "✅" if submitted else "⛔"
-                        line = f"- {emoji} *{name}* \n    - Due in {due_in.days} days, {math.floor(due_in.seconds/3600)} hours, and {math.ceil(due_in.seconds%3600 / 60)} minutes\n  - Link: {link}\n"
-                        if(len(msg) + len(line) > 1024):
-                            full = True
-                            embed.add_field(name=course_name, value=msg)
-                            msg = ""
-                        msg += line
-                    embed.add_field(name="\u200b" if full else course_name, value=msg, inline=False)
-                
+        embed = create_assignment_embed(assignments=assignments, days=userInfo[user_id]['days-warning'])
+        embed.set_footer(text="(To toggle notifications off, type `/toggle-notifications False`)")
+        
+        await user.send(embed=embed)
 
-
-            embed.set_footer(text="(To toggle notifications off, type `/toggle-notifications False`)")
-            
-            await user.send(embed=embed)
-
-            print(f"\tSuccessfully sent reminders for {userInfo[user_id]['name']}")
-        else:
-            print(f"\tUser {userInfo[user_id]['name']} has no assignments due. Woohoo!")
+        print(f"\tSuccessfully sent reminders for {userInfo[user_id]['name']}")
 
     return
 
@@ -315,54 +245,85 @@ BOT COMMANDS
 async def help_command(interaction: discord.Interaction):
     on_command(interaction)
 
-    message = """------------------------------------------------------------
-How to use the bot:
+    embed = discord.Embed(title='Need help? Look no further!', color=discord.Color.dark_blue(), )
 
-- `/setup-user <API-Token> <URL-Instance>` - Sets the API Token and Host URL for your Canvas account. Upon first use, you **must** include both arguments. *(They can each be updated later)*
+    how_it_works = """
+- This bot will send out a reminder DM every day at 7:00 AM (PST) **only** if you have assignments due.
+- Assignments that are marked complete on Canvas will be automatically detected by this bot.
+- However, if assignments are completed via 3rd-party websites (i.e Gradescope, Achieve, etc), this bot will not be able to detect completion.
 
-*API-Token* - A long string found on your Desktop Browser Canvas Settings page. Click `Account > Settings > + New Access Token and copy paste. But, once you create it, you cannot view it again unless you reset it, so be sure to copy paste!
+"""
+    embed.add_field(name="**__How does this bot work?__**", value=how_it_works, inline=False)
 
-*URL-Instance* - This is the site that hosts your Canvas Account. It is usually a school site, something like https://canvas.ucsc.edu/. To input, just copy and paste any URL from your canvas site.
+    embed.add_field(name="__**Below is a list of commands you can use with this bot!**__", value="\u200b", inline=False)
 
-**This command must be called before accessing any features of the bot. It also MUST be called in a DM with the bot. Never share your API Tokens!**
+    setup_desc = """- Sets the API Token and Host URL for your Canvas account. Upon first use, you **must** include both arguments. *(They can each be updated later)*
+- ❗**This command must be called before accessing any features of the bot.**"""
+    embed.add_field(name="__`/setup-user`__", value=setup_desc, inline=False)
+    
+    toggle_desc = """- Toggles notifications on/off. You will be reminded of an asssignment if it is due in less than `<dayswarning>` days. 
+- Default: `<toggle> = True`, `<dayswarning> = 1`."""
+    embed.add_field(name="__`/toggle-notifications <toggle> <dayswarning>`__", value=toggle_desc, inline=False)
 
+    get_assignments_desc = """- Returns the list of upcoming assignments from all Dashboard Courses due in `<days>` days (default 7 days)."""
+    embed.add_field(name="__`/get-assignments`__", value=get_assignments_desc, inline=False)
 
-- `/toggle-notifications <toggle> <dayswarning>` - Toggles notifications on/off. You will be reminded of an asssignment if it is due in less than `<dayswarning>` days. 
-Default: `<toggle> = True`, `<dayswarning> = 1`.
+    get_courses_desc = """- Returns a list of your Dashboard Courses
+- For a course to appear on your Dashboard, it must be \"Favorited\" on Canvas. This is done for you by your school most of the time."""
+    embed.add_field(name="__`/get-courses`__", value=get_courses_desc, inline=False)
 
-The bot will send out messages every day at 7:00 AM (PST) **only** if you have assignments due. You can mark an assignment as completed by reacting with a :white_check_mark: on it.
-This reaction will be registered right before the next reminder is sent.
+    help_desc = """- Prints this message"""
+    embed.add_field(name="__`/help`__", value=help_desc, inline=False)
 
-
-- `/get-assignments` - Returns the list of upcoming assignments from all Dashboard Courses.
-
-- `/get-courses` - This command returns the list of your Dashboard Courses.
-
-(For a course to show up on your Dashboard, it must be "Favorited" on Canvas. This is done for you by your school most of the time.)
-
-
-- `/reset-completed-assignments` - Resets completed assignments. Only call if you accidentally marked an assignment as complete.
-------------------------------------------------------------"""
-
-
-    await interaction.response.send_message(message)
+    await interaction.response.send_message(embed=embed)
     return
 
-@bot.tree.command(name="setup-user", description="Set the API Token and URL Instance for your user.")
-@app_commands.describe(token="Your Canvas API Token. This is a long string that can be obtained from your Canvas Profile Settings.", base_url="Where your Canvas account is hosted from (ie. `canvas.ucsc.edu`)")
-async def setup_user(interaction: discord.Interaction, token: str=None, base_url: str=None):
+
+
+class Setup(discord.ui.Modal, title='Let\'s get you set up!'):
+    url = discord.ui.TextInput(label='Your Canvas Page URL', required=False, placeholder='canvas.example.edu')
+    token = discord.ui.TextInput(label='Your Canvas API', style=discord.TextStyle.paragraph, placeholder='A long string found on your Canvas Settings page.', required=False)
+
+    # button = discord.ui.Button(label="Submit", custom_id='confirm')
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+
+
+
+@bot.tree.command(name="setup", description="Set the API Token and URL Instance for your user.")
+# @app_commands.describe(token="Your Canvas API Token. This is a long string that can be obtained from your Canvas Profile Settings.", base_url="Where your Canvas account is hosted from (ie. `canvas.ucsc.edu`)")
+async def setup_user(interaction: discord.Interaction):
     on_command(interaction)
     
+    # DISABLED FOR NOW
     # This checks to make sure the command is called in a DM.
-    if(interaction.guild is not None):
-        print(f"\tUser tried calling DM command in Guild.")
-        await interaction.channel.send("You cannot call this command in a server! Please DM this command to me instead!\nI have deleted the original message, but I still recommend that you reset your API Token for safety")
-        await interaction.response.send_message("Deleting interaction.")
-        await interaction.delete_original_response()
-        return
+    # if(interaction.guild is not None):
+    #     print(f"\tUser tried calling DM command in Guild.")
+    #     await interaction.channel.send("You cannot call this command in a server! Please DM this command to me instead!\nI have deleted the original message, but I still recommend that you reset your API Token for safety")
+    #     await interaction.response.send_message("Deleting interaction.")
+    #     await interaction.delete_original_response()
+    #     return
 
-    if(base_url is None and token is None):
-        await interaction.response.send_message(f"""
+    modal = Setup()
+    await interaction.response.send_modal(modal)
+
+    errored = await modal.wait()
+
+    print("View finished normally?", not errored)
+
+    #If the view does not close properly (aka it times out or if the user presses Cancel/Esc), return and exit function.
+    if(errored): return
+
+    base_url = str(modal.url)
+    token = str(modal.token)
+
+    print(base_url, token)
+
+
+
+    if(len(base_url) + len(token) == 0):
+        await interaction.followup.send(f"""
 You cannot call this command with no inputs!
 Call with one or both of the following:
 
@@ -380,51 +341,45 @@ Call with one or both of the following:
         print(f"\tNew user detected ({user_id}). Adding to `userInfo` dictionary.")
 
         #The user must provide both arguments when first setting up.
-        if(token is None or base_url is None):
+        if(len(token) + len(base_url) == 0):
             print(f"\tUser did not provide both Token & BaseURL upon first calling. Failed.")
         
-            await interaction.response.send_message("Since this is your first time setting up on the Canvas Bot, you must provide both your API Token & URL Instance. These can be updated later if you wish.")
-            await asyncio.sleep(3)
-            await interaction.delete_original_response()
+            await interaction.followup.send("Since this is your first time setting up on the Canvas Bot, you must provide both your API Token & URL Instance. These can be updated later if you wish.")
             return
 
     # These if statements grab the URL instance and/or Token if they were left blank. 
     # If either is None, that means they exist within the dictionary already. Both cannot be None due to the previous checks.
     
-    if(base_url is None):
+    if(len(base_url) == 0):
         base_url = userInfo[user_id]['canvas-instance']
     else:
         print(f"\tUser inputted: {base_url}")
         result = re.search(r"(\w+\.\w+\.\w+).*$", base_url)
         if result is None:
             print(f"\tError: Invalid URL")
-            await interaction.channel.send(f"`{base_url}` is not a valid URL! It should include `canvas.xxxxx.xxx`")
-            await interaction.response.send_message(f"Error. For your safety, this interaction will be deleted in 3 seconds.")
-            await asyncio.sleep(3)
-            await interaction.delete_original_response()
+            await interaction.followup.send(f"`{base_url}` is not a valid URL!", ephemeral=True)
             return
         base_url = result.group(1)
         print(f"\tExtracted group: {base_url}")
 
 
-    if(token is None):
+    if(len(token) == 0):
         token = userInfo[user_id]['canvas-token']
 
     failure = False
     # Make a GET request to Canvas to retrieve user's Name and ID.
     try:
         canvas_request = requests.get(f"https://{base_url}/api/v1/users/self?access_token={token}")
+        failure = not validCode(canvas_request.status_code)
     except Exception as e:
         print(f"\tRan into Exception: [{e}] when performing GET request")
         failure = True
 
     # If failure, end and delete interaction
-    if(not validCode(canvas_request.status_code) or failure == True):            
-        print(f"\tError with Canvas GET request: Status Code {canvas_request.status_code} for:\n{canvas_request.url}")
+    if(failure):            
+        print(f"\tError with Canvas GET request")
 
-        await interaction.response.send_message(f"There was a problem with the outgoing request to Canvas. Make sure your API Access Token is up to date and your URL Instance is correct.")
-        await asyncio.sleep(3)
-        await interaction.delete_original_response()    
+        await interaction.followup.send(f"There was a problem with the outgoing request to Canvas. Make sure your API Access Token is up to date and your URL Instance is correct.", ephemeral=True)
         return
     
     else:
@@ -446,14 +401,9 @@ Call with one or both of the following:
         'completed-assignments': []
     }
         
-    await interaction.response.send_message("Your settings have been updated. For your security, this interaction will be deleted in 3 seconds.")
-    
-    
-    await asyncio.sleep(3)
-    await interaction.delete_original_response()
+    await interaction.followup.send("Your settings have been updated.")    
     return
     # Phew... That was one long function...
-    
     
 @bot.tree.command(name="toggle-notifications", description="Toggle assignment reminder notifications on/off with N days-warning")
 @app_commands.describe(toggle="Notifications: True = On | False = Off, (Default: True)", dayswarning="I will remind you this many days before an assignment is due. (Default: 1 day)")
@@ -484,49 +434,30 @@ async def toggle_notifications(interaction: discord.Interaction, toggle: bool=Tr
 
     return    
 
-
-
-@bot.tree.command(name="get-assignments", description="Returns a list of your upcoming assignments.")
-@app_commands.describe(days="Show assignments due within this many days (Default 7)")
-async def get_assignments(interaction: discord.Interaction, days: int=7):
-    on_command(interaction)
+# Fetches assignments for a given user and returns a dictionary of courses -> assignments
+def fetch_assignments(user_id: int) -> dict:
     
-    user_id = str(interaction.user.id)
-    # If user has notifications toggled off, skip
-    global userInfo    
-    print(f"\tSending reminders for {userInfo[user_id]['name']}")
-    
-
     canvas_instance = userInfo[user_id]['canvas-instance']
     canvas_token = userInfo[user_id]['canvas-token']
     canvas_id = userInfo[user_id]['canvas-id']
+    days = userInfo[user_id]['days-warning']
 
     courses_request = requests.get(f"https://{canvas_instance}/api/v1/users/self/favorites/courses?access_token={canvas_token}")
 
     if(not validCode(courses_request.status_code)):            
         print(f"\tError with Canvas GET request: Status Code {courses_request.status_code} for:\n{courses_request.url}\nSkipping user {userInfo[user_id]['name']}({user_id})")
-        interaction.response.send_message(f"Looks like there was a problem with the request")
-        return
+        return None
     
     courses_json = courses_request.json()
 
-    # 'pending-assignments' is a dictionary mapping message ID -> assignment ID. For each message, check if it has a checkmark reaction.
-    # If it does, then add it to the list of assignments to ignore.
-
-
-    for message_id in userInfo[user_id]['pending-assignments'].keys():
-        message = await bot.get_user(int(user_id)).fetch_message(int(message_id))
-        for reaction in message.reactions:
-            if reaction.count == 2:
-                print(f"\tReaction found on message {message_id}.")
-                completed = userInfo[user_id]['pending-assignments'][message_id]
-                userInfo[user_id]['completed-assignments'].append(completed)
-    
-    await interaction.response.defer()    
     assignments = {}
+
     for course in courses_json:
         id = course['id']
-        params = {'include': ['submission']}
+        params = {
+            'include': ['submission'],
+            'per_page': 500
+            }
         course_assignments = requests.get(f"https://{canvas_instance}/api/v1/users/{canvas_id}/courses/{id}/assignments?access_token={canvas_token}", params=params)
         
         if(not validCode(course_assignments.status_code)):            
@@ -536,62 +467,79 @@ async def get_assignments(interaction: discord.Interaction, days: int=7):
 
         course_assignments_json = course_assignments.json()
         assignments[course['name']] = []
-        has_incomplete_assignments = False
         for asgn in course_assignments_json:
 
-        
             if(asgn['due_at'] is None):
                 continue
 
         
             time_until_due = datetime.datetime.strptime(asgn['due_at'], '%Y-%m-%dT%H:%M:%SZ') - datetime.datetime.utcnow()
+            # print(f"\t{asgn['name']}\t\t\t{time_until_due}")
+
             if time_until_due > datetime.timedelta(days=0) and time_until_due <= datetime.timedelta(days=days):
                 assignments[course['name']].append((asgn['name'], time_until_due, asgn['submission']['submitted_at'] != None, asgn['html_url']))
-                has_incomplete_assignments = True
+    
+    return assignments
 
-    if(not has_incomplete_assignments):
+
+@bot.tree.command(name="get-assignments", description="Returns a list of your upcoming assignments.")
+@app_commands.describe(days="Show assignments due within this many days (Default 7)")
+async def get_assignments(interaction: discord.Interaction, days: int=7):
+    on_command(interaction)
+    
+    user_id = str(interaction.user.id)
+    global userInfo    
+    
+    await interaction.response.defer()
+
+    assignments = fetch_assignments(user_id=user_id)
+
+    if(assignments == None):
+        interaction.response.send_message(f"Looks like there was a problem with the request. Please make sure your APIs have been set up correctly.\n(run `/help` for more info)")
+
+    # print(assignments)
+
+    incomplete_assignments = sum(len(l) for l in assignments.values())
+    if(incomplete_assignments == 0):
         print(f"\t{bot.get_user(int(user_id)).name} has no pending assignments!")
         no_asgn = discord.Embed(title="Assignments", description=f"Congratulations @{interaction.user.name}, you have no upcoming assignments!", color= discord.Color.green())
-        await interaction.response.send_message(embed=no_asgn)
+        await interaction.followup.send(embed=no_asgn)
         return
     
-    print(assignments)
-    if(len(assignments) > 0):    
+    embed = create_assignment_embed(assignments=assignments, days=userInfo[user_id]['days-warning'])
+    
+    await interaction.followup.send(embed=embed)
 
-        embed = discord.Embed(title="Assignment Reminder", description=f"Hey @{interaction.user.name}, here is a list of assignments that are due in the next {userInfo[user_id]['days-warning']} days!", color=discord.Color.green())
-        
-        for course_name, asgns in assignments.items():
-            if(len(asgns) > 0):
-                full = False
-                msg = ""
-                for (name, due_in, submitted, link) in asgns:
-                    # submitted = True
-                    # print(name, due_in, submitted)
-                    emoji = "✅" if submitted else "⛔"
-                    if(not submitted):
-                        embed.color = discord.Color.red()
-                    line = f"- {emoji} *{name}* \n    - Due in {'**' * (due_in < datetime.timedelta(days=3))}{due_in.days} days, {math.floor(due_in.seconds/3600)} hours, and {math.ceil(due_in.seconds%3600 / 60)} minutes{'**' * (due_in < datetime.timedelta(days=3))}\n  - Link: {link}\n"
-                    if(len(msg) + len(line) > 1024):
-                        full = True
-                        embed.add_field(name=course_name, value=msg)
-                        msg = ""
-                    msg += line
-                # print(msg)
-                # print(len(msg))
-                embed.add_field(name="\u200b" if full else course_name, value=msg, inline=False)
-            
-
-        
-        await interaction.followup.send(embed=embed)
-
-        print(f"\tSuccessfully sent reminders for {userInfo[user_id]['name']}")
-    else:
-        print(f"\tUser {userInfo[user_id]['name']} has no assignments due. Woohoo!")
+    print(f"\tSuccessfully sent reminders for {userInfo[user_id]['name']}")
 
     return
 
 
-    return
+def create_assignment_embed(assignments: dict, days: int) -> discord.Embed:
+    
+    embed = discord.Embed(title="Assignment Reminder", description=f"Hey! here is a list of assignments that are due in the next {days} days!", color=discord.Color.green())
+    
+    for course_name, asgns in assignments.items():
+        if(len(asgns) > 0):
+            full = False
+            msg = ""
+            for (name, due_in, submitted, link) in asgns:
+                # submitted = True
+                # print(name, due_in, submitted)
+                emoji = "✅" if submitted else "⛔"
+                if(not submitted):
+                    embed.color = discord.Color.red()
+                line = f"- {emoji} *{name}* \n    - Due in {'**' * (due_in < datetime.timedelta(days=3))}{due_in.days} days, {math.floor(due_in.seconds/3600)} hours, and {math.ceil(due_in.seconds%3600 / 60)} minutes{'**' * (due_in < datetime.timedelta(days=3))}\n  - Link: {link}\n"
+                if(len(msg) + len(line) > 1024):
+                    full = True
+                    embed.add_field(name=course_name, value=msg)
+                    msg = ""
+                msg += line
+            # print(msg)
+            # print(len(msg))
+            embed.add_field(name="\u200b" if full else course_name, value=msg, inline=False)
+    
+    return embed
 
 
 
