@@ -216,7 +216,7 @@ async def daily(ids=None):
             continue
         print(f"\tSending reminders for {userInfo[user_id]['name']}")
 
-        assignments = fetch_assignments(user_id=user_id)    
+        assignments = fetch_assignments(user_id=user_id, days=userInfo[user_id]['days-warning'])    
         incomplete_assignments = sum(len(l) for l in assignments.values())
 
         if(incomplete_assignments == 0):
@@ -224,7 +224,7 @@ async def daily(ids=None):
             continue
 
         user = bot.get_user(int(user_id))
-        user = bot.get_user(MY_ID)
+        # user = bot.get_user(MY_ID)
 
         embed = create_assignment_embed(assignments=assignments, days=userInfo[user_id]['days-warning'])
         embed.set_footer(text="(To toggle notifications off, type `/toggle-notifications False`)")
@@ -435,14 +435,17 @@ async def toggle_notifications(interaction: discord.Interaction, toggle: bool=Tr
     return    
 
 # Fetches assignments for a given user and returns a dictionary of courses -> assignments
-def fetch_assignments(user_id: int) -> dict:
+def fetch_assignments(user_id: int, days: int) -> dict:
     
     canvas_instance = userInfo[user_id]['canvas-instance']
     canvas_token = userInfo[user_id]['canvas-token']
     canvas_id = userInfo[user_id]['canvas-id']
-    days = userInfo[user_id]['days-warning']
 
-    courses_request = requests.get(f"https://{canvas_instance}/api/v1/users/self/favorites/courses?access_token={canvas_token}")
+    assignments = {}    # We're going to return this
+
+    link = f"https://{canvas_instance}/api/v1/users/self/favorites/courses?access_token={canvas_token}"
+    
+    courses_request = requests.get(link)
 
     if(not validCode(courses_request.status_code)):            
         print(f"\tError with Canvas GET request: Status Code {courses_request.status_code} for:\n{courses_request.url}\nSkipping user {userInfo[user_id]['name']}({user_id})")
@@ -450,34 +453,46 @@ def fetch_assignments(user_id: int) -> dict:
     
     courses_json = courses_request.json()
 
-    assignments = {}
+    
+
+    params = {
+        'include': ['submission'],
+        'per_page': 100,
+        'access_token': canvas_token
+    }
 
     for course in courses_json:
         id = course['id']
-        params = {
-            'include': ['submission'],
-            'per_page': 500
-            }
-        course_assignments = requests.get(f"https://{canvas_instance}/api/v1/users/{canvas_id}/courses/{id}/assignments?access_token={canvas_token}", params=params)
         
-        if(not validCode(course_assignments.status_code)):            
-            print(f"\tError with Canvas GET request: Status Code {courses_request.status_code} for:\n{courses_request.url}\nSkipping assignment {id}")
-            continue
-
-
-        course_assignments_json = course_assignments.json()
+        course_link = f"https://{canvas_instance}/api/v1/users/{canvas_id}/courses/{id}/assignments"
+        
         assignments[course['name']] = []
-        for asgn in course_assignments_json:
 
-            if(asgn['due_at'] is None):
+        while True:
+            course_assignments = requests.get(course_link, params=params)
+            
+            if(not validCode(course_assignments.status_code)):            
+                print(f"\tError with Canvas GET request: Status Code {courses_request.status_code} for:\n{courses_request.url}\nSkipping assignment {id}")
                 continue
 
-        
-            time_until_due = datetime.datetime.strptime(asgn['due_at'], '%Y-%m-%dT%H:%M:%SZ') - datetime.datetime.utcnow()
-            # print(f"\t{asgn['name']}\t\t\t{time_until_due}")
+            course_assignments_json = course_assignments.json()
 
-            if time_until_due > datetime.timedelta(days=0) and time_until_due <= datetime.timedelta(days=days):
-                assignments[course['name']].append((asgn['name'], time_until_due, asgn['submission']['submitted_at'] != None, asgn['html_url']))
+            for asgn in course_assignments_json:
+
+                if(asgn['due_at'] is None):
+                    continue
+
+            
+                time_until_due = datetime.datetime.strptime(asgn['due_at'], '%Y-%m-%dT%H:%M:%SZ') - datetime.datetime.utcnow()
+
+                if time_until_due > datetime.timedelta(days=0) and time_until_due <= datetime.timedelta(days=days):
+                    assignments[course['name']].append((asgn['name'], time_until_due, asgn['submission']['submitted_at'] != None, asgn['html_url']))
+                    print(f"\t{asgn['name']}\t\t\t{time_until_due}")
+            
+            if "next" not in course_assignments.links.keys():
+                break
+            else:
+                course_link = course_assignments.links['next']['url']
     
     return assignments
 
@@ -492,7 +507,7 @@ async def get_assignments(interaction: discord.Interaction, days: int=7):
     
     await interaction.response.defer()
 
-    assignments = fetch_assignments(user_id=user_id)
+    assignments = fetch_assignments(user_id=user_id, days=days)
 
     if(assignments == None):
         interaction.response.send_message(f"Looks like there was a problem with the request. Please make sure your APIs have been set up correctly.\n(run `/help` for more info)")
@@ -506,7 +521,7 @@ async def get_assignments(interaction: discord.Interaction, days: int=7):
         await interaction.followup.send(embed=no_asgn)
         return
     
-    embed = create_assignment_embed(assignments=assignments, days=userInfo[user_id]['days-warning'])
+    embed = create_assignment_embed(assignments=assignments, days=days)
     
     await interaction.followup.send(embed=embed)
 
@@ -524,19 +539,15 @@ def create_assignment_embed(assignments: dict, days: int) -> discord.Embed:
             full = False
             msg = ""
             for (name, due_in, submitted, link) in asgns:
-                # submitted = True
-                # print(name, due_in, submitted)
                 emoji = "✅" if submitted else "⛔"
                 if(not submitted):
                     embed.color = discord.Color.red()
                 line = f"- {emoji} *{name}* \n    - Due in {'**' * (due_in < datetime.timedelta(days=3))}{due_in.days} days, {math.floor(due_in.seconds/3600)} hours, and {math.ceil(due_in.seconds%3600 / 60)} minutes{'**' * (due_in < datetime.timedelta(days=3))}\n  - Link: {link}\n"
                 if(len(msg) + len(line) > 1024):
                     full = True
-                    embed.add_field(name=course_name, value=msg)
+                    embed.add_field(name=course_name, value=msg, inline=False)
                     msg = ""
                 msg += line
-            # print(msg)
-            # print(len(msg))
             embed.add_field(name="\u200b" if full else course_name, value=msg, inline=False)
     
     return embed
