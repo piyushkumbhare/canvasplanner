@@ -2,16 +2,15 @@
 IMPORT LIBRARIES
 """####################################################################
 
-#Standard Libraries
+# Standard Libraries
 import requests
 import os
 import datetime
-import json
-import asyncio
-import math
 import re
+import sqlite3
+import datetime
 
-#Non-standard Libraries installed with pip
+# Non-standard Libraries installed with pip
 import discord
 from discord import app_commands
 from discord.utils import get
@@ -19,16 +18,30 @@ from discord.ext import commands, tasks
 
 from dotenv import load_dotenv
 
-import pytz
-
-import datetime
-
+# Local Libraries that contain utility functions
+from canvas_tools import *
 
 """####################################################################
 GLOBAL VARIABLES
 """####################################################################
 
 load_dotenv()
+
+con = sqlite3.connect("users.db")
+cursor = con.cursor()
+cursor.row_factory = sqlite3.Row
+
+# users table is formatted as follows
+# id    name    canvas_token    canvas_instance     canvas_name canvas_id   notifications   days_warning
+# id = discord id
+# name = discord name
+# notifications = 0 | 1
+
+# assignments table is formattes as follows
+# id    owner   assignment_name assignment_id       course_name course_id   due_date        submitted   url
+# INT   STR     STR             INT                 STR         INT         DATETIME        INT         STR
+
+# due_date = YYYY-MM-DD HH:MI:SS
 
 BOT_ID = int(os.getenv('BOT_ID'))
 BOT_TOKEN = os.getenv('BOT_TOKEN')
@@ -41,29 +54,6 @@ CANVAS_TOKEN = os.getenv('CANVAS_TOKEN')
 # PST = UTC - 8
 run_time = datetime.time(hour=16, minute=00)
 
-
-def on_command(interaction):
-    if(interaction.guild is None):
-        print(f"-- Direct Message with {interaction.user.name}: `/{interaction.command.name}` by {interaction.user.name}")
-    else:
-        print(f"-- {interaction.guild.name}({interaction.guild.id}): `/{interaction.command.name}` by {interaction.user.name}")
-
-    return
-
-def writeToFile():
-
-    try:
-        json_object = json.dumps(userInfo, indent=4)
-    except Exception as e:
-        print(f"\tCRITICAL ERROR: When trying to json.dumps(), ran into\n: {e}")
-        return
-    
-    with open('users.json', 'w+') as j:
-        j.write(json_object)
-        print(f"\tWrote to file `users.json` successfully.")
-    return
-
-
 """####################################################################
 BOT INITIALIZATION
 """####################################################################
@@ -73,11 +63,15 @@ bot = commands.Bot(command_prefix='$', owner_id = MY_ID, intents=discord.Intents
 @bot.event
 async def on_ready():
     print("-- Bot is starting up.")
+    
+    #Load SQL database
+    cursor.execute("SELECT * FROM users")
+    users = cursor.fetchall()
+    print("Loading users...")
+    for user in users:
+        print(user['name'])
+    print("Loading done.")
 
-    global userInfo
-    with open('users.json', 'r') as f:
-        userInfo = json.load(f)
-        print(f"\tLoaded info for {len(userInfo)} users.")
     print(f"\tTime right now: {datetime.datetime.utcnow()}")
     print(f"\tDaily task will run once per day at {run_time} UTC")
     
@@ -101,8 +95,8 @@ DEV COMMANDS
 """####################################################################
 @bot.command()
 @commands.dm_only()
-async def printjson(ctx):
-    print(f"-- Direct message with {ctx.author.name}: `$printjson` called by {ctx.author.name}")
+async def printdb(ctx):
+    print(f"-- Direct message with {ctx.author.name}: `$printdb` called by {ctx.author.name}")
     #Check to see if it was called by owner.    
     called_by_owner = await bot.is_owner(ctx.author)
 
@@ -110,11 +104,34 @@ async def printjson(ctx):
         await ctx.send("Only the owner can call this command! Hands off!")
         return
 
-    jsondict = json.dumps(userInfo, indent=4)
+    cursor.execute("SELECT * FROM users")
+    users_rows = cursor.fetchall()
 
-    await ctx.send(f"```{jsondict}```")
+    users_row_str = ""
+    for row in users_rows:
+        users_row_str += str(dict(row)) + '\n'
+
+    cursor.execute("SELECT * FROM assignments")
+    assignments_rows = cursor.fetchall()
+
+    assignments_row_str = ""
+    for row in assignments_rows:
+        assignments_row_str += str(dict(row)) + '\n'
+
+
+    message = f"""## Users:
+```
+{users_rows[0].keys()}
+{users_row_str}
+```"""
+# ## Assignments
+# ```
+# {assignments_rows[0].keys()}
+# {assignments_row_str}
+# ```
+
+    await ctx.send(message)
     return
-
 
 
 @bot.command()
@@ -128,8 +145,6 @@ async def save_values(ctx):
         await ctx.send("Only the owner can call this command! Hands off!")
         return
 
-    #If it is me calling it, write JSON files.
-    writeToFile()
     
     await ctx.send("Values saved, boss. :saluting_face:")
     return
@@ -141,21 +156,18 @@ async def sd(ctx):
     #Check to see if it was called by owner.    
     called_by_owner = await bot.is_owner(ctx.author)
    
-    # activity = discord.Activity(type=discord.ActivityType.streaming, name="Offline ⛔")
-    # bot.change_presence(activity=activity)
 
     if called_by_owner == False:
         await ctx.send("Only the owner can call this command! Hands off!")
         return
-
-    #If it is me calling it, write JSON files.
-    writeToFile()
 
     await ctx.send("Shutting down. Until next time... :wave:")
     print()
     
     #Then close bot
     print("-- Bot Shutting Down")
+    cursor.close()
+    con.close()
     await bot.close()
     print()
     return
@@ -185,53 +197,79 @@ async def simdaily(ctx: commands.context.Context):
 
     args = ctx.message.content.split()
     ids = []
-    for arg in args[1::]:
-        for userid, userdata in userInfo.items():
-            if(arg == userdata['name']):
-                ids.append(userid)
+    for name in args[1::]:
+        
+        cursor.execute(f"SELECT id FROM users WHERE name = '{name}'")
+        user = cursor.fetchone()
+        
+        # if the name given was not found in database
+        if(user is None):
+            continue
+
+        # if the name is found, return the id associated with it
+        ids.append(user['id'])
+
+
     await daily(ids=ids)
     return
 
 
 
-async def daily(ids=None):
+async def daily(ids):
     print("-- Starting Daily Task")
 
     me = bot.get_user(MY_ID)
     await me.send("Hello sir, just checking in. The daily tasks are under way. As you were.")   
 
     # First save to the file
-    writeToFile()
+    # writeToFile()
 
-    global userInfo
-    users_to_iterate = ids if (len(ids) > 0) else list(userInfo.keys())
+    users_to_iterate = []
 
-    await me.send([bot.get_user(int(i)).name for i in users_to_iterate])   
-    print(f"\t{users_to_iterate}")
+    if(len(ids) > 0):
 
-    for user_id in users_to_iterate:
+        # ok so this whole thing is here because SQL's IN statements have to be formatted like
+        # SELECT ... WHERE id IN (1, 2, 3, 4);
+        # so this idset thing is just the ids set, except expressed as a neat string with ()
+        idset = "("
+        for i in ids:
+            idset += str(i) + "," * (i != ids[-1])
+        idset += ")"
+        
+        
+        q = f"SELECT * FROM users WHERE id IN {idset}"
+        print(idset)
+        print(f'\t{q}')
+        cursor.execute(q)
+        users_to_iterate = cursor.fetchall()
+    else:
+        cursor.execute(f"SELECT * FROM users")
+        users_to_iterate = cursor.fetchall()
+
+    await me.send([user['name'] for user in users_to_iterate])   
+
+    for user in users_to_iterate:
         # If user has notifications toggled off, skip
-        if(userInfo[user_id]['notifications'] == False):
-            print(f"\tSkipping reminders for {userInfo[user_id]['name']}")
+        if(user['notifications'] == False):
+            print(f"\tSkipping reminders for {user['name']}")
             continue
-        print(f"\tSending reminders for {userInfo[user_id]['name']}")
+        print(f"\tSending reminders for {user['name']}")
 
-        assignments = fetch_assignments(user_id=user_id, days=userInfo[user_id]['days-warning'])    
+        assignments = fetch_assignments(discord_id=user['id'], days=user['days_warning'])    
         incomplete_assignments = sum(len(l) for l in assignments.values())
 
         if(incomplete_assignments == 0):
-            print(f"\t{bot.get_user(int(user_id)).name} has no pending assignments!")
+            print(f"\t{user['name']} has no pending assignments!")
             continue
 
-        user = bot.get_user(int(user_id))
-        # user = bot.get_user(MY_ID)
+        user = bot.get_user(user['id'])
 
-        embed = create_assignment_embed(assignments=assignments, days=userInfo[user_id]['days-warning'])
+        embed = create_assignment_embed(assignments=assignments, days=user['days_warning'])
         embed.set_footer(text="(To toggle notifications off, type `/toggle-notifications False`)")
         
         await user.send(embed=embed)
 
-        print(f"\tSuccessfully sent reminders for {userInfo[user_id]['name']}")
+        print(f"\tSuccessfully sent reminders for {user['name']}")
 
     return
 
@@ -249,7 +287,7 @@ async def help_command(interaction: discord.Interaction):
 
     how_it_works = """
 - This bot will send out a reminder DM every day at 7:00 AM (PST) **only** if you have assignments due.
-- Assignments that are marked complete on Canvas will be automatically detected by this bot.
+- Assignments that are submitted on Canvas will be automatically detected by this bot.
 - However, if assignments are completed via 3rd-party websites (i.e Gradescope, Achieve, etc), this bot will not be able to detect completion.
 
 """
@@ -257,16 +295,16 @@ async def help_command(interaction: discord.Interaction):
 
     embed.add_field(name="__**Below is a list of commands you can use with this bot!**__", value="\u200b", inline=False)
 
-    setup_desc = """- Sets the API Token and Host URL for your Canvas account. Upon first use, you **must** include both arguments. *(They can each be updated later)*
+    setup_desc = """- Sets the API Token + Host URL for your Canvas account and whether to have Notifications On/Off + Days Warning. Upon first use, all arguments are required. *(They can each be updated later)*
 - ❗**This command must be called before accessing any features of the bot.**"""
-    embed.add_field(name="__`/setup-user`__", value=setup_desc, inline=False)
+    embed.add_field(name="__`/settings`__", value=setup_desc, inline=False)
     
-    toggle_desc = """- Toggles notifications on/off. You will be reminded of an asssignment if it is due in less than `<dayswarning>` days. 
-- Default: `<toggle> = True`, `<dayswarning> = 1`."""
-    embed.add_field(name="__`/toggle-notifications <toggle> <dayswarning>`__", value=toggle_desc, inline=False)
+    delete_desc = """- Deletes your data from this bot's database. In order to confirm deletion, you must type `DELETE` in all CAPS exactly. """
+    embed.add_field(name="__`/delete-user <confirm>`__", value=delete_desc, inline=False)
 
-    get_assignments_desc = """- Returns the list of upcoming assignments from all Dashboard Courses due in `<days>` days (default 7 days)."""
-    embed.add_field(name="__`/get-assignments`__", value=get_assignments_desc, inline=False)
+    get_assignments_desc = """- Returns the list of upcoming assignments from all Dashboard Courses due in `<days>` days (default 7 days).
+- If `<update>` is set to True (default False), forces a request to Canvas (only use this if a newly posted assignment is not showing up)"""
+    embed.add_field(name="__`/get-assignments <days> <update>`__", value=get_assignments_desc, inline=False)
 
     get_courses_desc = """- Returns a list of your Dashboard Courses
 - For a course to appear on your Dashboard, it must be \"Favorited\" on Canvas. This is done for you by your school most of the time."""
@@ -280,32 +318,45 @@ async def help_command(interaction: discord.Interaction):
 
 
 
-class Setup(discord.ui.Modal, title='Let\'s get you set up!'):
-    url = discord.ui.TextInput(label='Your Canvas Page URL', required=False, placeholder='canvas.example.edu')
-    token = discord.ui.TextInput(label='Your Canvas API', style=discord.TextStyle.paragraph, placeholder='A long string found on your Canvas Settings page.', required=False)
+class FirstSetup(discord.ui.Modal, title='Let\'s get you set up!'):
+    url = discord.ui.TextInput(label='Your Canvas Page URL', required=True, placeholder='A URL like canvas.example.edu')
+    
+    token = discord.ui.TextInput(label='Your Canvas API Token', style=discord.TextStyle.paragraph, placeholder='A long string found on your Canvas Settings page.', required=True)
 
-    # button = discord.ui.Button(label="Submit", custom_id='confirm')
+    notifications = discord.ui.TextInput(label="Notifications", placeholder="Yes | No   (Default: Yes)", required=False)
+
+    days_warning = discord.ui.TextInput(label="Days Warning", placeholder="Any whole number greater than 0 (Default 7)", required=False)
+
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+
+
+class UpdateSettings(discord.ui.Modal, title='Empty fields will not be updated.'):
+    url = discord.ui.TextInput(label='Your Canvas Page URL', required=False, placeholder='A URL like canvas.example.edu')
+    
+    token = discord.ui.TextInput(label='Your Canvas API Token', style=discord.TextStyle.paragraph, placeholder='A long string found on your Canvas Settings page.', required=False)
+
+    notifications = discord.ui.TextInput(label="Notifications", placeholder="Yes | No", required=False)
+
+    days_warning = discord.ui.TextInput(label="Days Warning", placeholder="Any whole number greater than 0", required=False)
+
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer()
 
 
 
-@bot.tree.command(name="setup", description="Set the API Token and URL Instance for your user.")
-# @app_commands.describe(token="Your Canvas API Token. This is a long string that can be obtained from your Canvas Profile Settings.", base_url="Where your Canvas account is hosted from (ie. `canvas.ucsc.edu`)")
-async def setup_user(interaction: discord.Interaction):
+@bot.tree.command(name="settings", description="Set or update your API Token, URL, and Notifications.")
+async def settings(interaction: discord.Interaction):
     on_command(interaction)
     
-    # DISABLED FOR NOW
-    # This checks to make sure the command is called in a DM.
-    # if(interaction.guild is not None):
-    #     print(f"\tUser tried calling DM command in Guild.")
-    #     await interaction.channel.send("You cannot call this command in a server! Please DM this command to me instead!\nI have deleted the original message, but I still recommend that you reset your API Token for safety")
-    #     await interaction.response.send_message("Deleting interaction.")
-    #     await interaction.delete_original_response()
-    #     return
-
-    modal = Setup()
+    if(user_exists(interaction.user.id)):
+        modal = UpdateSettings()
+    else:
+        print(f"\tNew user detected ({interaction.user.name}). Adding to database.")
+        modal = FirstSetup()
+    
     await interaction.response.send_modal(modal)
 
     errored = await modal.wait()
@@ -317,42 +368,14 @@ async def setup_user(interaction: discord.Interaction):
 
     base_url = str(modal.url)
     token = str(modal.token)
+    notifications = str(modal.notifications)
+    days_warning = str(modal.days_warning)
 
-    print(base_url, token)
-
-
-
-    if(len(base_url) + len(token) == 0):
-        await interaction.followup.send(f"""
-You cannot call this command with no inputs!
-Call with one or both of the following:
-
-**API Token** - A long string found on your Canvas Settings page. Click `[+ New Access Token]` and copy paste!
-
-**URL Instance** - The URL where your Canvas account is hosted. Copy paste any URL from your Canvas.        
-        """)
-        return
-
-    # Stringify User's id to stay consistent with JSON dictionaries.
-    user_id = str(interaction.user.id)
-
-    # Check if the user exists in the userInfo dictionary.
-    if(user_id not in userInfo.keys()):
-        print(f"\tNew user detected ({user_id}). Adding to `userInfo` dictionary.")
-
-        #The user must provide both arguments when first setting up.
-        if(len(token) + len(base_url) == 0):
-            print(f"\tUser did not provide both Token & BaseURL upon first calling. Failed.")
-        
-            await interaction.followup.send("Since this is your first time setting up on the Canvas Bot, you must provide both your API Token & URL Instance. These can be updated later if you wish.")
-            return
+    print(f"base_url: {base_url}, token: {token}, notifications: {notifications}, days_warning: {days_warning}")
 
     # These if statements grab the URL instance and/or Token if they were left blank. 
-    # If either is None, that means they exist within the dictionary already. Both cannot be None due to the previous checks.
-    
-    if(len(base_url) == 0):
-        base_url = userInfo[user_id]['canvas-instance']
-    else:
+    if(not user_exists(interaction.user.id)):
+        # USER IS NEW TO DATABASE
         print(f"\tUser inputted: {base_url}")
         result = re.search(r"(\w+\.\w+\.\w+).*$", base_url)
         if result is None:
@@ -362,9 +385,51 @@ Call with one or both of the following:
         base_url = result.group(1)
         print(f"\tExtracted group: {base_url}")
 
+        if(days_warning == ""):
+            days_warning = 7
 
-    if(len(token) == 0):
-        token = userInfo[user_id]['canvas-token']
+        if(notifications == ""):
+            notifications = 1
+        else:
+            notifications = 1 if notifications.upper() == "YES" else 0
+
+    else:
+        # USER ALREADY EXISTS IN DATABASE
+        cursor.execute(f"SELECT canvas_instance, canvas_token, notifications, days_warning FROM users WHERE id={interaction.user.id}")
+        user = cursor.fetchone()
+        
+        # If URL not given, fetch from database. Otherwise, run the Regex check to ensure it's valid and extract the right string
+        if(len(base_url) == 0):
+            base_url = user['canvas_instance']
+        else:
+            result = re.search(r"(\w+\.\w+\.\w+).*$", base_url)
+            if result is None:
+                print(f"\tError: Invalid URL")
+                await interaction.followup.send(f"`{base_url}` is not a valid URL!", ephemeral=True)
+                return
+            base_url = result.group(1)
+            print(f"\tExtracted group: {base_url}")
+        
+        # If Token not given, fetch from database
+        if(len(token) == 0):
+            token = user['canvas_token']
+        
+        # If Notifications not given, default to stored value. Otherwise, anything that's not YES means NO
+        if(len(notifications) == 0):
+            notifications = user['notifications']
+        else:
+            notifications = 1 if notifications.upper() == "YES" else 0
+        
+        # If Days not given, fetch from database. Otherwise
+        if(len(days_warning) == 0):
+            days_warning = user['days_warning']
+        else:
+            try:
+                days_warning = int(days_warning)
+            except ValueError:
+                days_warning = user['days_warning']
+
+
 
     failure = False
     # Make a GET request to Canvas to retrieve user's Name and ID.
@@ -385,139 +450,91 @@ Call with one or both of the following:
     else:
         print(f"\tSuccessful Canvas GET request: Status Code {canvas_request.status_code}")
 
-    # Get the JSON output of the response.
+    # Get the JSON output of the response
     canvas_json = canvas_request.json()
 
-    # Update user info within the dictionary.
-    userInfo[user_id] = {
-        'name': interaction.user.name,
-        'canvas-token': token,
-        'canvas-instance': base_url,
-        'canvas-name': canvas_json['name'],
-        'canvas-id': canvas_json['id'],
-        'notifications': True,
-        'days-warning': 1,
-        'pending-assignments': {},
-        'completed-assignments': []
-    }
-        
-    await interaction.followup.send("Your settings have been updated.")    
-    return
-    # Phew... That was one long function...
+
+    # Update database
+    user = (interaction.user.id, interaction.user.name, token, base_url, canvas_json['name'], canvas_json['id'], notifications, days_warning)
+    print(str(user))
+
+    if(user_exists(interaction.user.id)):
+        q = f"UPDATE users SET canvas_instance = '{base_url}', canvas_name = '{canvas_json['name']}', canvas_id = {canvas_json['id']}, notifications = {notifications}, days_warning = {days_warning} WHERE id = {interaction.user.id}"
+        print(q)
+        cursor.execute(q)
+    else:
+        user = (interaction.user.id, interaction.user.name, token, base_url, canvas_json['name'], canvas_json['id'], notifications, days_warning)
+        cursor.executemany("INSERT INTO users VALUES(?, ?, ?, ?, ?, ?, ?, ?)", [user])
     
-@bot.tree.command(name="toggle-notifications", description="Toggle assignment reminder notifications on/off with N days-warning")
-@app_commands.describe(toggle="Notifications: True = On | False = Off, (Default: True)", dayswarning="I will remind you this many days before an assignment is due. (Default: 1 day)")
-async def toggle_notifications(interaction: discord.Interaction, toggle: bool=True, dayswarning: int=1):
+    con.commit()
+
+    cursor.execute(f"SELECT * FROM users WHERE id = {interaction.user.id}")
+    user_after_update = cursor.fetchone()
+
+    await interaction.followup.send(f"Your settings have been updated to: URL - `{user_after_update['canvas_instance']}`, Notifications - `{user_after_update['notifications']}`, Days Warning - `{user_after_update['days_warning']}`", ephemeral=True)    
+    return
+
+
+@bot.tree.command(name="delete-user", description="Deletes your data from my database. WARNING: THIS CANNOT BE UNDONE")
+@app_commands.describe(confirm="To confirm, type `DELETE` in all CAPS.")
+async def delete_user(interaction: discord.Interaction, confirm: str):
     on_command(interaction)
 
-    user_id = str(interaction.user.id)
-
-    if(user_id not in userInfo.keys()):
+    if(not user_exists(interaction.user.id)):
         print(f"\tUser {interaction.user.name} not found in database. Aborting.")
-        await interaction.response.send_message("It looks like you have not been added to my database yet. Please do so by calling /setup-user.")
+        await interaction.response.send_message("I couldn't find you in my database. Maybe you already deleted your data?", ephemeral=True)
         return
     
-    userInfo[user_id]['notifications'] = toggle
+    if(confirm != "DELETE"):
+        print(f"\tUser {interaction.user.name} did not type `DELETE` exactly: {confirm}")
+        await interaction.response.send_message("Confirmation failed. Aborting delete command. In order to delete, please make sure you type `DELETE` exactly in all CAPS.", ephemeral=True)
+        return
 
-    # Days-warning cannot be less than 1
-    if(dayswarning < 1):
-        dayswarning = 1
-
-    userInfo[user_id]['days-warning'] = dayswarning
-
-    if(toggle == True):
-        await interaction.response.send_message(f"You will now receive a reminder {dayswarning} day(s) before an assignment is due!")
-    else:
-        await interaction.response.send_message("You will no longer receive reminders about assignment due dates")
-
-    print(f"\tToggled notifications for {interaction.user.name} to {toggle} and {dayswarning} days.")
-
-    return    
-
-# Fetches assignments for a given user and returns a dictionary of courses -> assignments
-def fetch_assignments(user_id: int, days: int) -> dict:
+    if(confirm == "DELETE"):
+        cursor.execute(f"DELETE FROM users WHERE id = {interaction.user.id}")
+        cursor.execute(f"DELETE FROM assignments WHERE discord_id = {interaction.user.id}")
+        con.commit()
     
-    canvas_instance = userInfo[user_id]['canvas-instance']
-    canvas_token = userInfo[user_id]['canvas-token']
-    canvas_id = userInfo[user_id]['canvas-id']
+    await interaction.response.send_message("Your data has successfully been deleted. You may add yourself back to the database by calling `/settings`.")
 
-    assignments = {}    # We're going to return this
-
-    link = f"https://{canvas_instance}/api/v1/users/self/favorites/courses?access_token={canvas_token}"
-    
-    courses_request = requests.get(link)
-
-    if(not validCode(courses_request.status_code)):            
-        print(f"\tError with Canvas GET request: Status Code {courses_request.status_code} for:\n{courses_request.url}\nSkipping user {userInfo[user_id]['name']}({user_id})")
-        return None
-    
-    courses_json = courses_request.json()
-
-    
-
-    params = {
-        'include': ['submission'],
-        'per_page': 100,
-        'access_token': canvas_token
-    }
-
-    for course in courses_json:
-        id = course['id']
-        
-        course_link = f"https://{canvas_instance}/api/v1/users/{canvas_id}/courses/{id}/assignments"
-        
-        assignments[course['name']] = []
-
-        while True:
-            course_assignments = requests.get(course_link, params=params)
-            
-            if(not validCode(course_assignments.status_code)):            
-                print(f"\tError with Canvas GET request: Status Code {courses_request.status_code} for:\n{courses_request.url}\nSkipping assignment {id}")
-                continue
-
-            course_assignments_json = course_assignments.json()
-
-            for asgn in course_assignments_json:
-
-                if(asgn['due_at'] is None):
-                    continue
-
-            
-                time_until_due = datetime.datetime.strptime(asgn['due_at'], '%Y-%m-%dT%H:%M:%SZ') - datetime.datetime.utcnow()
-
-                if time_until_due > datetime.timedelta(days=0) and time_until_due <= datetime.timedelta(days=days):
-                    assignments[course['name']].append((asgn['name'], time_until_due, asgn['submission']['submitted_at'] != None, asgn['html_url']))
-                    print(f"\t{asgn['name']}\t\t\t{time_until_due}")
-            
-            if "next" not in course_assignments.links.keys():
-                break
-            else:
-                course_link = course_assignments.links['next']['url']
-    
-    return assignments
 
 
 @bot.tree.command(name="get-assignments", description="Returns a list of your upcoming assignments.")
-@app_commands.describe(days="Show assignments due within this many days (Default 7)")
-async def get_assignments(interaction: discord.Interaction, days: int=7):
+@app_commands.describe(days="Show assignments due within this many days (Default 7)", update="Forces a new call to Canvas to update assignments. Only use this if a newly posted assignment is not showing up.")
+async def get_assignments(interaction: discord.Interaction, days: int=7, update: bool=False):
     on_command(interaction)
     
-    user_id = str(interaction.user.id)
-    global userInfo    
+    if(not user_exists(interaction.user.id)):
+        print(f"\tUser {interaction.user.name} not found in database. Aborting.")
+        await interaction.response.send_message("It looks like you have not been added to my database yet. Please do so by calling `/settings`.")
+        return
     
+    cursor.execute(f"SELECT * FROM users WHERE id = {interaction.user.id}")
+    user = cursor.fetchone()
+
     await interaction.response.defer()
 
-    assignments = fetch_assignments(user_id=user_id, days=days)
+    if(update or days > int(user['days_warning'])):
+        # FORCE UPDATE
+        assignments = fetch_assignments(discord_id=interaction.user.id, days=days)
+    else:
+        # READ FROM DB
+        cursor.execute(f"SELECT * FROM assignments WHERE discord_id = {interaction.user.id} AND due_date BETWEEN datetime('now') AND datetime('now', '+{days + 1} days')")
+        assignments = cursor.fetchall()
 
-    if(assignments == None):
-        interaction.response.send_message(f"Looks like there was a problem with the request. Please make sure your APIs have been set up correctly.\n(run `/help` for more info)")
+        print("Printing assignments")
 
-    # print(assignments)
+    for assignment in assignments:
+        print(assignment['assignment_name'])
 
-    incomplete_assignments = sum(len(l) for l in assignments.values())
-    if(incomplete_assignments == 0):
-        print(f"\t{bot.get_user(int(user_id)).name} has no pending assignments!")
-        no_asgn = discord.Embed(title="Assignments", description=f"Congratulations @{interaction.user.name}, you have no upcoming assignments!", color= discord.Color.green())
+
+    # if(len(assignments) == 0):
+    #     interaction.response.send_message(f"Looks like there was a problem with the request. Please make sure your APIs have been set up correctly.\n(run `/help` for more info)")
+
+
+    if(len(assignments) == 0):
+        print(f"\t{interaction.user.name} has no pending assignments!")
+        no_asgn = discord.Embed(title="Assignments", description=f"Congratulations {interaction.user.name}, you have no upcoming assignments!", color= discord.Color.green())
         await interaction.followup.send(embed=no_asgn)
         return
     
@@ -525,32 +542,11 @@ async def get_assignments(interaction: discord.Interaction, days: int=7):
     
     await interaction.followup.send(embed=embed)
 
-    print(f"\tSuccessfully sent reminders for {userInfo[user_id]['name']}")
+    print(f"\tSuccessfully sent reminders for {interaction.user.name}")
 
     return
 
 
-def create_assignment_embed(assignments: dict, days: int) -> discord.Embed:
-    
-    embed = discord.Embed(title="Assignment Reminder", description=f"Hey! here is a list of assignments that are due in the next {days} days!", color=discord.Color.green())
-    
-    for course_name, asgns in assignments.items():
-        if(len(asgns) > 0):
-            full = False
-            msg = ""
-            for (name, due_in, submitted, link) in asgns:
-                emoji = "✅" if submitted else "⛔"
-                if(not submitted):
-                    embed.color = discord.Color.red()
-                line = f"- {emoji} *{name}* \n    - Due in {'**' * (due_in < datetime.timedelta(days=3))}{due_in.days} days, {math.floor(due_in.seconds/3600)} hours, and {math.ceil(due_in.seconds%3600 / 60)} minutes{'**' * (due_in < datetime.timedelta(days=3))}\n  - Link: {link}\n"
-                if(len(msg) + len(line) > 1024):
-                    full = True
-                    embed.add_field(name=course_name, value=msg, inline=False)
-                    msg = ""
-                msg += line
-            embed.add_field(name="\u200b" if full else course_name, value=msg, inline=False)
-    
-    return embed
 
 
 
@@ -558,16 +554,17 @@ def create_assignment_embed(assignments: dict, days: int) -> discord.Embed:
 async def get_courses(interaction: discord.Interaction):
     on_command(interaction)
 
-    user_id = str(interaction.user.id)
-
-    if(user_id not in userInfo.keys()):
-        await interaction.response.send_message("It looks like you have not been added to my database yet. Please do so by calling /setup-user.")
+    if(not user_exists(interaction.user.id)):
+        print(f"\tUser {interaction.user.name} not found in database. Aborting.")
+        await interaction.response.send_message("It looks like you have not been added to my database yet. Please do so by calling `/settings`.")
         return
+    
+    cursor.execute(f"SELECT canvas_token, canvas_instance FROM users WHERE id = {interaction.user.id}")
+    user = cursor.fetchone()
 
-    canvas_instance = userInfo[user_id]['canvas-instance']
-    canvas_token = userInfo[user_id]['canvas-token']
-    canvas_id = userInfo[user_id]['canvas-id']
-
+    canvas_token = user['canvas_token']
+    canvas_instance = user['canvas_instance']
+    
     courses_request = requests.get(f"https://{canvas_instance}/api/v1/users/self/favorites/courses?access_token={canvas_token}")
 
     if(not validCode(courses_request.status_code)):            
@@ -599,9 +596,6 @@ DRIVER CODE
 """####################################################################
 
 
-# Returns True if status code is successfull (aka 2xx)
-def validCode(status_code):
-    return (status_code >= 200 and status_code < 300)
 
 def main():
     bot.run(BOT_TOKEN)

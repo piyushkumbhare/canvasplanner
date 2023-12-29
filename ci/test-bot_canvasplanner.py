@@ -299,13 +299,12 @@ async def help_command(interaction: discord.Interaction):
 - ❗**This command must be called before accessing any features of the bot.**"""
     embed.add_field(name="__`/settings`__", value=setup_desc, inline=False)
     
-#     toggle_desc = """- Toggles notifications on/off. You will be reminded of an asssignment if it is due in less than `<dayswarning>` days. 
-# - Default: `<toggle> = True`, `<dayswarning> = 1`."""
-#     embed.add_field(name="__`/toggle-notifications <toggle> <dayswarning>`__", value=toggle_desc, inline=False)
+    delete_desc = """- Deletes your data from this bot's database. In order to confirm deletion, you must type `DELETE` in all CAPS exactly. """
+    embed.add_field(name="__`/delete-user <confirm>`__", value=delete_desc, inline=False)
 
     get_assignments_desc = """- Returns the list of upcoming assignments from all Dashboard Courses due in `<days>` days (default 7 days).
 - If `<update>` is set to True (default False), forces a request to Canvas (only use this if a newly posted assignment is not showing up)"""
-    embed.add_field(name="__`/get-assignments <days> <force-update>`__", value=get_assignments_desc, inline=False)
+    embed.add_field(name="__`/get-assignments <days> <update>`__", value=get_assignments_desc, inline=False)
 
     get_courses_desc = """- Returns a list of your Dashboard Courses
 - For a course to appear on your Dashboard, it must be \"Favorited\" on Canvas. This is done for you by your school most of the time."""
